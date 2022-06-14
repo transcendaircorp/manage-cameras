@@ -49,13 +49,40 @@ function getStorageStats(){
   })
 }
 
+
+/** @typedef {{name:string, size: number, date: Date}} videoFile */
+/**
+ * Returns a list of all files in the Videos directory
+ * @returns {Promise<videoFile[]>}
+ */
+function getVideos(){
+  return new Promise((resolve, reject) => {
+    exec('ls -l --full-time /home/jetson/Videos', (err, stdout, stderr) => {
+      if (err)
+        reject(err)
+      resolve(stdout.split('\n').slice(1).map(l => {
+        const parts = l.trim().split(/\s+/)
+        /** @type {videoFile} */
+        const file = {
+          name: parts[9],
+          size: Number(parts[4]),
+          date: new Date(parts.slice(5, 7).join(' '))
+        }
+        return file
+      }))
+    })
+  })
+}
+
+
+
 /**
  * Kill specified process, and wait for it to exit.
  * @param {ChildProcess} process Process to kill
  * @param {NodeJS.Signals} signal Signal to send to process
  * @returns {Promise<void>}
  */
-function killProcess(process, signal = 'SIGTERM'){
+function killProcess(process, signal = 'SIGINT'){
   return new Promise((resolve, reject) => {
     if(process.exitCode != null) return resolve()
     process.on('exit', () => resolve())
@@ -80,18 +107,17 @@ async function killProcesses(processes, signal = undefined){
  * Start camera process
  * @param {number} camera Video stream number
  * @param {number} port Port to listen on
- * @param {string?} session Optional session name, which will be used to create a file to record to
  * @returns {ChildProcess}
  */
-function startCamera(camera, port, session){
+function startCamera(camera, port){
   let args = [
     '-i',
     `input_uvc.so -d /dev/video${camera} -r 1920x1080 -f 60`,
     '-o',
-    `output_http.so -p ${port}`
+    `output_http.so -p ${port}`,
+    '-o',
+    'output_file.so -f /home/jetson/Videos -m .tmp'
   ]
-  if (session)
-    args.push('-o', `output_file.so -f /home/jetson/Videos -m ${session}_Video${camera}--${formatDate(new Date())}.mjpg`)
   return spawn('mjpg_streamer', args)
 }
 
@@ -106,39 +132,78 @@ function formatDate(date){
 
 /**
  * Start all the cameras. If a session is passed in, the cameras will record to a file.
- * @param {string?} session 
  * @returns {Promise<ChildProcess[]>}
  */
-async function startCameras(session){
+async function startCameras(){
   const cameras = await getCameras()
   const port = 8081;
-  return cameras.map((camera, i) => startCamera(camera, port+i, session))
+  return cameras.map((camera, i) => startCamera(camera, port+i))
+}
+
+/**
+ * Write a string to processes stdin
+ * @param {ChildProcess} process
+ * @param {string} str
+ * @returns {Promise<void>}
+ */
+function writeLn(process, str){
+  return new Promise((res, rej) => {
+    if(!process.stdin)
+      rej('Process has no stdin')
+    process.stdin.write(`${str}\n`, (err) => {
+      if (err)
+        rej(err)
+      else
+        res()
+    })
+  })
 }
 
 /** @type {Object.<number, ChildProcess>} */
 const processes = {};
+/** @type {Object.<number, string>} */
+const cameraNames = {};
 
-// Start cameras in streaming only mode
-(await startCameras(null)).forEach(p => processes[p.pid??-1] = p)
+// Start cameras
+(await startCameras()).forEach(p => processes[p.pid??-1] = p)
 //basic express server
 const app = express()
 app.get('/start', async (req, res) => {
   let session = req.query.session
   if(!session) return res.sendStatus(400)
-  await killProcesses(processes)
-  ;(await startCameras("" + session)).forEach(p => processes[p.pid??-1] = p)
+  Object.values(processes).forEach((p, i) => {
+    writeLn(p, 'stop')
+    const name = cameraNames[p.pid]??i;
+    writeLn(p, `start ${session}_Video${name}--${formatDate(new Date())}.mjpg`)
+  })
   res.send('OK')
 })
 app.get('/stop', async (req, res) => {
+  Object.values(processes).forEach(p => {
+    writeLn(p, 'stop')
+  })
+  res.send('OK')
+})
+app.get('/restart', async (req, res) => {
   await killProcesses(processes)
-  ;(await startCameras(null)).forEach(p => processes[p.pid??-1] = p)
+  ;(await startCameras()).forEach(p => processes[p.pid??-1] = p)
   res.send('OK')
 })
 app.get('/status', async (req, res) => {
   res.send(JSON.stringify({
-    processes: Object.values(processes).map(p => ({args: p.spawnargs, exitCode: p.exitCode, pid: p.pid})),
+    processes: Object.values(processes).map(p => ({
+      args: p.spawnargs,
+      exitCode: p.exitCode,
+      pid: Number(p.pid),
+      port: Number(p.spawnargs[4]?.split(' ')?.[2]??-1)
+    })),
     freeStorage: await getStorageStats(),
+    videoFiles: await getVideos()
   }, null, 2))
+})
+app.get('/setCameraNames', async (req, res) => {
+  Object.assign(cameraNames, req.query)
+  res.send('OK')
 })
 //serve express
 app.listen(8080, () => {
