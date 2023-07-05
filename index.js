@@ -220,7 +220,8 @@ app.get('/restart', async (req, res) => {
   res.send('OK')
 })
 app.get('/status', async (req, res) => {
-  res.send('<div style="white-space: pre-wrap;">' + JSON.stringify({
+  res.header('Content-Type', 'application/json')
+  res.send(JSON.stringify({
     processes: Object.values(processes).map(p => ({
       args: p.spawnargs,
       exitCode: p.exitCode,
@@ -228,7 +229,7 @@ app.get('/status', async (req, res) => {
     })),
     freeStorage: await getStorageStats(),
     videoFiles: await getVideos()
-  }, null, 2) + '</div>')
+  }))
 })
 app.get('/setCameraNames', async (req, res) => {
   Object.assign(cameraNames, req.query)
