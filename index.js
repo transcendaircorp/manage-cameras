@@ -57,14 +57,14 @@ function getStorageStats(){
  */
 function getVideos(){
   return new Promise((resolve, reject) => {
-    exec('ls -l --full-time /home/jetson/Videos', (err, stdout, stderr) => {
+    exec('ls -l --full-time /media/videousb', (err, stdout, stderr) => {
       if (err)
         reject(err)
-      resolve(stdout.split('\n').slice(1).map(l => {
+      resolve(stdout.split('\n').slice(1, -1).map(l => {
         const parts = l.trim().split(/\s+/)
         /** @type {videoFile} */
         const file = {
-          name: parts[9],
+          name: parts[8],
           size: Number(parts[4]),
           date: new Date(parts.slice(5, 7).join(' '))
         }
@@ -109,16 +109,23 @@ async function killProcesses(processes, signal = undefined){
  * @param {number} port Port to listen on
  * @returns {ChildProcess}
  */
+
+// ("c,camera", "Path to camera device, i.e. /dev/video0", cxxopts::value<std::string>()) //
+//       ("f,framerate", "Framerate for the video source", cxxopts::value<int>())                                //
+//       ("r,resolution", "Resolution for the video source, i.e. 1920x1080", cxxopts::value<std::string>())      //
+//       ("h,help", "");
 function startCamera(camera, port){
   let args = [
-    '-i',
-    `input_uvc.so -d /dev/video${camera} -r 1920x1080 -f 60`,
-    '-o',
-    `output_http.so -p ${port}`,
-    '-o',
-    'output_file.so -f /home/jetson/Videos -m .tmp'
+    '-c',
+    `/dev/video${camera}`,
+    '-f',
+    '60',
+    '-r',
+    '1920x1080',
+    '-a',
+    '239.200.10.37:' + port
   ]
-  return spawn('mjpg_streamer', args)
+  return spawn('cam2rtpfile', args)
 }
 
 /**
@@ -136,7 +143,7 @@ function formatDate(date){
  */
 async function startCameras(){
   const cameras = await getCameras()
-  const port = 8081;
+  const port = 5000;
   return cameras.map((camera, i) => startCamera(camera, port+i))
 }
 
@@ -168,17 +175,34 @@ const cameraNames = {};
 (await startCameras()).forEach(p => processes[p.pid??-1] = p)
 //basic express server
 const app = express()
-app.get('/start', async (req, res) => {
+app.get('/record', async (req, res) => {
   let session = req.query.session
   if(!session) return res.sendStatus(400)
   Object.values(processes).forEach((p, i) => {
-    writeLn(p, 'stop')
     const name = cameraNames[p.pid]??i;
-    writeLn(p, `start ${session}_Video${name}--${formatDate(new Date())}.mjpg`)
+    writeLn(p, `record /media/videousb/${session}_Video${name}--${formatDate(new Date())}`)
   })
   res.send('OK')
 })
-app.get('/stop', async (req, res) => {
+app.get('/stoprecord', async (req, res) => {
+  Object.values(processes).forEach(p => {
+    writeLn(p, 'stoprecord')
+  })
+  res.send('OK')
+})
+app.get('/play', async (req, res)=> {
+  Object.values(processes).forEach(p => {
+    writeLn(p, 'play')
+  })
+  res.send('OK')
+})
+app.get('/pause', async (req, res)=> {
+  Object.values(processes).forEach(p => {
+    writeLn(p, 'pause')
+  })
+  res.send('OK')
+})
+app.get('/stop', async (req, res)=> {
   Object.values(processes).forEach(p => {
     writeLn(p, 'stop')
   })
@@ -186,20 +210,25 @@ app.get('/stop', async (req, res) => {
 })
 app.get('/restart', async (req, res) => {
   await killProcesses(processes)
-  ;(await startCameras()).forEach(p => processes[p.pid??-1] = p)
+  try {
+    (await startCameras()).forEach(p => processes[p.pid??-1] = p)
+  } catch(err){
+    res.sendStatus(500)
+    return
+  }
+  res.status(200)
   res.send('OK')
 })
 app.get('/status', async (req, res) => {
-  res.send(JSON.stringify({
+  res.send('<div style="white-space: pre-wrap;">' + JSON.stringify({
     processes: Object.values(processes).map(p => ({
       args: p.spawnargs,
       exitCode: p.exitCode,
       pid: Number(p.pid),
-      port: Number(p.spawnargs[4]?.split(' ')?.[2]??-1)
     })),
     freeStorage: await getStorageStats(),
     videoFiles: await getVideos()
-  }, null, 2))
+  }, null, 2) + '</div>')
 })
 app.get('/setCameraNames', async (req, res) => {
   Object.assign(cameraNames, req.query)
