@@ -18,24 +18,87 @@ interface CameraProcess {
   port: number;
   proc: ChildProcess;
 }
+interface VideoFormat {
+  pixelFormat: string;
+  width: number;
+  height: number;
+  fps: number;
+}
+interface CameraProperties {
+  deviceNumber: number;
+  formats: VideoFormat[];
+}
 
+function parseVideoFormats(output: string): VideoFormat[] {
+  const formats: VideoFormat[] = [];
+  const lines = output.split("\n");
+
+  let currentPixelFormat: string | null = null;
+  let currentSize: { width: number; height: number } | null = null;
+
+  for (let i = 0; i < lines.length; i++) {
+    const parts = lines[i].trim().split(":");
+    if (parts.length !== 2) continue;
+    const key = parts[0].trim();
+    const value = parts[1].trim();
+
+    if (key === "Pixel Format") {
+      currentPixelFormat = null;
+      const pixelFormatMatch = value.match(/'(.*)'/);
+      if (pixelFormatMatch === null) continue;
+      currentPixelFormat = pixelFormatMatch[1];
+      continue;
+    }
+    if (key === "Size") {
+      currentSize = null;
+      const sizeMatch = value.match(/(\d+)x(\d+)/);
+      if (sizeMatch === null) continue;
+      currentSize = {
+        width: parseInt(sizeMatch[1]),
+        height: parseInt(sizeMatch[2]),
+      };
+      continue;
+    }
+    if (key === "Interval") {
+      const intervalMatch = value.match(/.*(\d+\.\d+)s \((\d+\.\d+) fps\)/);
+      if (intervalMatch === null) continue;
+      formats.push({
+        pixelFormat: currentPixelFormat ?? "",
+        width: currentSize?.width ?? 0,
+        height: currentSize?.height ?? 0,
+        fps: parseFloat(intervalMatch[2]),
+      });
+    }
+  }
+  return formats;
+}
+
+async function execAsync(command: string): Promise<string> {
+  return await new Promise((resolve, reject) => {
+    exec(command, (err, stdout, _stderr) => {
+      if (err != null) reject(err);
+      resolve(stdout);
+    });
+  });
+}
 /**
  * Runs command to fetch currently attached cameras.
  */
-async function getCameras(): Promise<number[]> {
-  return await new Promise((resolve, reject) => {
-    exec("v4l2-ctl --list-devices", (err, stdout, _stderr) => {
-      if (err != null) reject(err);
-      const lines = stdout.split("\n");
-      const cameras = [];
-      for (let i = 1; i < lines.length; i++) {
-        if (lines[i - 1].endsWith(":")) {
-          cameras.push(lines[i].split("video")[1].trim());
-        }
-      }
-      resolve(cameras.map(Number));
-    });
-  });
+async function getCameras(): Promise<CameraProperties[]> {
+  const lines = (await execAsync("v4l2-ctl --list-devices")).split("\n");
+  const cameras: number[] = [];
+  for (let i = 1; i < lines.length; i++)
+    if (lines[i - 1].endsWith(":"))
+      cameras.push(Number(lines[i].split("video")[1].trim()));
+  return await Promise.all(
+    cameras.map(async (c) => {
+      const res = await execAsync(`v4l2-ctl -d ${c} --list-formats-ext`);
+      return {
+        deviceNumber: c,
+        formats: parseVideoFormats(res),
+      };
+    })
+  );
 }
 
 /**
@@ -92,36 +155,29 @@ async function getVideos(): Promise<VideoFile[]> {
 
 /**
  * Kill specified process, and wait for it to exit.
- * @param {ChildProcess} process Process to kill
- * @param {NodeJS.Signals} signal Signal to send to process
- * @returns {Promise<void>}
+ * @param process Process to kill
+ * @param signal Signal to send to process
  */
 async function killProcess(
   process: ChildProcess,
   signal: NodeJS.Signals = "SIGINT"
 ): Promise<void> {
-  let exitCb: (code: number | null, signal: string | null) => void;
-  let errorCb: (err: Error) => void;
+  let exitCb: () => void;
   await new Promise<void>((resolve, reject) => {
-    if (process.exitCode != null) {
-      resolve();
+    exitCb = resolve;
+    if (process.exitCode != null || process.signalCode != null) {
+      exitCb();
       return;
     }
-    exitCb = () => {
-      resolve();
-    };
-    errorCb = (err) => {
-      reject(err);
-    };
     process.on("exit", exitCb);
-    process.on("error", errorCb);
+    process.on("error", exitCb);
     process.on("close", exitCb);
     process.on("disconnect", exitCb);
+    setTimeout(reject, 2000);
     process.kill(signal);
-    setTimeout(reject, 5000);
   }).finally(() => {
     process.off("exit", exitCb);
-    process.off("error", errorCb);
+    process.off("error", exitCb);
     process.off("close", exitCb);
     process.off("disconnect", exitCb);
   });
@@ -156,11 +212,22 @@ async function killProcesses(
  * @param camera Video stream number
  * @param port Port to listen on
  */
-function startCamera(camera: number, port: number): CameraProcess {
-  const args = ["-c", `/dev/video${camera}`, "-f", "60", "-r", "1920x1080"];
+function startCamera(camera: CameraProperties, port: number): CameraProcess {
+  // find best format
+  const format = camera.formats
+    .filter((c) => c.pixelFormat.toLocaleUpperCase() === "MJPG")
+    .filter((c) => c.width === 1920 && c.height === 1080)
+    .reduce((a, b) => (a.fps > b.fps ? a : b));
   return {
     port,
-    proc: spawn("cam2rtpfile", args),
+    proc: spawn("cam2rtpfile", [
+      "-c",
+      `/dev/video${camera.deviceNumber}`,
+      "-f",
+      format.fps.toString(),
+      "-r",
+      `${format.width}x${format.height}`,
+    ]),
   };
 }
 
@@ -176,10 +243,31 @@ function formatDate(date: Date): string {
 /**
  * Start all the cameras. If a session is passed in, the cameras will record to a file.
  */
-async function startCameras(): Promise<CameraProcess[]> {
-  const cameras = await getCameras();
+async function startCameras(): Promise<void> {
   const port = 5000;
-  return cameras.map((camera, i) => startCamera(camera, port + i));
+  const cameras = await getCameras();
+  for (const [i, cameraProperties] of cameras.entries()) {
+    const camera = startCamera(cameraProperties, port + i);
+    const process = camera.proc;
+    const pid = process.pid as number;
+    process.on("disconnect", () => {
+      console.log("Camera disconnected: ", pid);
+      cameraProcesses.delete(pid);
+    });
+    process.on("exit", (code, signal) => {
+      console.log("Camera exit: ", pid, code, signal);
+      cameraProcesses.delete(pid);
+    });
+    process.on("close", (code, signal) => {
+      console.log("Camera close: ", pid, code, signal);
+      cameraProcesses.delete(pid);
+    });
+    process.on("error", (err) => {
+      console.log("Camera error: ", pid, err);
+      cameraProcesses.delete(pid);
+    });
+    cameraProcesses.set(pid, camera);
+  }
 }
 
 /**
@@ -187,8 +275,8 @@ async function startCameras(): Promise<CameraProcess[]> {
  */
 async function writeLn(process: ChildProcess, str: string): Promise<void> {
   await new Promise<void>((resolve, reject) => {
-    if (process.stdin == null) {
-      reject(new Error("Process has no stdin"));
+    if (process.stdin == null || !process.stdin.writable) {
+      reject(new Error("Cannot write to process stdin"));
       return;
     }
     try {
@@ -197,88 +285,63 @@ async function writeLn(process: ChildProcess, str: string): Promise<void> {
         else resolve();
       });
     } catch (e) {
-      console.log("Failed write\n");
+      reject(new Error("Cannot write to process stdin"));
     }
   });
 }
 
 type CameraProcessMap = Map<number, CameraProcess>;
-const processes: CameraProcessMap = new Map();
+const cameraProcesses: CameraProcessMap = new Map();
 type CameraNameMap = Map<number, string>;
 const cameraNames: CameraNameMap = new Map();
 
-// Start cameras
-async function main(): Promise<void> {
-  (await startCameras()).forEach((p) => processes.set(p.proc.pid ?? -1, p));
-}
-
 function logError(msg: string) {
   return (err: Error) => {
-    console.error(err, msg);
+    console.error(msg, err);
   };
 }
 
-main().catch((err) => {
-  console.error(err);
-});
+await startCameras();
 // basic express server
 const app = express();
-app.get("/request", (req, _res) => {
-  // get ip of request
+// eslint-disable-next-line @typescript-eslint/no-misused-promises
+app.get("/request", async (req, res) => {
   const ip = req.ip.split(":").slice(-1)[0];
-  for (const [, p] of processes) {
-    writeLn(p.proc, `addclient ${ip} ${p.port}`).catch(
-      logError(`Failed to add client ${ip} to camera ${p.port}`)
-    );
-  }
-});
-app.get("/record", (req, res) => {
-  const sessionValue = req.query.session;
-  // check if session is non null string
-  if (sessionValue == null || !(sessionValue instanceof String)) {
-    return res.sendStatus(400);
-  }
-  const session = sessionValue as string;
-  let i = 0;
-  for (const p of processes.values()) {
-    const name = cameraNames.get(p.proc.pid ?? -1) ?? i;
-    writeLn(
-      p.proc,
-      `record /media/videousb/${session}_Video${name}--${formatDate(
-        new Date()
-      )}`
-    ).catch(logError(`Failed to start recording on camera ${p.port}`));
-    i++;
-  }
-  res.send("OK");
-});
-app.get("/stoprecord", (_req, res) => {
-  for (const p of processes.values()) {
-    writeLn(p.proc, "stoprecord").catch(logError(""));
-  }
-  res.send("OK");
-});
-app.get("/play", (_req, res) => {
-  for (const p of processes.values()) {
-    writeLn(p.proc, "play").catch(logError(""));
-  }
-  res.send("OK");
-});
-app.get("/pause", (_req, res) => {
-  for (const p of processes.values()) {
-    writeLn(p.proc, "pause").catch(logError(""));
-  }
-  res.send("OK");
-});
-app.get("/stop", (_req, res) => {
-  for (const p of processes.values()) {
-    writeLn(p.proc, "stop").catch(logError(""));
+  for (const p of cameraProcesses.values()) {
+    try {
+      await writeLn(p.proc, `addclient ${ip} ${p.port}`);
+    } catch (e) {
+      logError(`Failed to add client ${ip} to camera ${p.port}`);
+    }
   }
   res.send("OK");
 });
 // eslint-disable-next-line @typescript-eslint/no-misused-promises
+app.get("/record", async (req, res) => {
+  const sessionValue = req.query.session;
+  if (sessionValue == null || !(sessionValue instanceof String))
+    return res.sendStatus(400);
+  const session = sessionValue as string;
+  for (const [i, p] of [...cameraProcesses.values()].entries()) {
+    const name = p.proc.pid == null ? i : cameraNames.get(p.proc.pid) ?? i;
+    await writeLn(
+      p.proc,
+      `record /media/videousb/${session}_Video${name}--${formatDate(
+        new Date()
+      )}`
+    );
+  }
+  res.send("OK");
+});
+// eslint-disable-next-line @typescript-eslint/no-misused-promises
+app.get("/:command(stoprecord|play|pause|stop)", async (req, res) => {
+  for (const p of cameraProcesses.values())
+    await writeLn(p.proc, req.params.command);
+  res.send("OK");
+});
+// eslint-disable-next-line @typescript-eslint/no-misused-promises
 app.get("/restart", async (_req, res) => {
-  const failed = (await killProcesses(processes)).filter(
+  const failed = (await killProcesses(cameraProcesses)).filter(
     (k) => k.status === "rejected"
   );
   if (failed.length > 0) {
@@ -287,7 +350,7 @@ app.get("/restart", async (_req, res) => {
     return;
   }
   try {
-    (await startCameras()).forEach((p) => processes.set(p.proc.pid ?? -1, p));
+    await startCameras();
   } catch (err) {
     res.sendStatus(500);
     return;
@@ -300,7 +363,7 @@ app.get("/status", async (_req, res) => {
   res.header("Content-Type", "application/json");
   res.send(
     JSON.stringify({
-      processes: Object.values(processes).map((p) => ({
+      processes: [...cameraProcesses.values()].map((p) => ({
         args: p.proc.spawnargs,
         exitCode: p.proc.exitCode,
         signalCode: p.proc.signalCode,
@@ -320,9 +383,15 @@ app.listen(8080, () => {
   console.log("listening on port 8080");
 });
 
-const sigs: NodeJS.Signals[] = ["SIGTERM", "SIGINT"];
+const sigs: NodeJS.Signals[] = ["SIGTERM", "SIGINT", "SIGQUIT"];
 for (const sig of sigs) {
   process.on(sig, () => {
-    killProcesses(processes, sig).finally(() => process.exit(0));
+    killProcesses(cameraProcesses, sig)
+      .then(() => process.exit(0))
+      .catch(() => {
+        killProcesses(cameraProcesses, "SIGKILL").finally(() => {
+          process.exit(1);
+        });
+      });
   });
 }
