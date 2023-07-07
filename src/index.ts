@@ -105,27 +105,21 @@ async function getCameras(): Promise<CameraProperties[]> {
  * Returns a list of storage devices
  */
 async function getStorageStats(): Promise<StorageDevice[]> {
-  return await new Promise((resolve, reject) => {
-    exec("df", (err, stdout, _stderr) => {
-      if (err != null) reject(err);
-      resolve(
-        stdout.split("\n").flatMap((l) => {
-          if (l.startsWith("/dev")) {
-            const parts = l.trim().split(/\s+/);
-            return [
-              {
-                device: parts[0],
-                size: Number(parts[1]),
-                used: Number(parts[2]),
-                available: Number(parts[3]),
-                use: parts[4],
-                mount: parts[5],
-              },
-            ];
-          } else return [];
-        })
-      );
-    });
+  const out = await execAsync("df");
+  return out.split("\n").flatMap((l) => {
+    if (l.startsWith("/dev")) {
+      const parts = l.trim().split(/\s+/);
+      return [
+        {
+          device: parts[0],
+          size: Number(parts[1]) * 1024,
+          used: Number(parts[2]) * 1024,
+          available: Number(parts[3]) * 1024,
+          use: parts[4],
+          mount: parts[5],
+        },
+      ];
+    } else return [];
   });
 }
 
@@ -318,10 +312,8 @@ app.get("/request", async (req, res) => {
 });
 // eslint-disable-next-line @typescript-eslint/no-misused-promises
 app.get("/record", async (req, res) => {
-  const sessionValue = req.query.session;
-  if (sessionValue == null || !(sessionValue instanceof String))
-    return res.sendStatus(400);
-  const session = sessionValue as string;
+  const session = req.query.session as string;
+  if (session == null) return res.sendStatus(400);
   for (const [i, p] of [...cameraProcesses.values()].entries()) {
     const name = p.proc.pid == null ? i : cameraNames.get(p.proc.pid) ?? i;
     await writeLn(
