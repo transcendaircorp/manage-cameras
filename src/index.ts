@@ -216,13 +216,13 @@ function startCamera(camera: CameraProperties, port: number): CameraProcess | nu
     ]),
   };
 }
-
+const zeroPad = (num: number, places: number): string => String(num).padStart(places, '0')
 /**
  * Formats date to be used in file names
  */
 function formatDate(date: Date): string {
-  return `${date.getFullYear()}-${date.getMonth() + 1
-    }-${date.getDate()}-${date.getHours()}-${date.getMinutes()}-${date.getSeconds()}`;
+  return `${zeroPad(date.getFullYear(), 4)}-${zeroPad((date.getMonth() + 1), 2)
+    }-${zeroPad(date.getDate(), 2)}-${zeroPad(date.getHours(), 2)}-${zeroPad(date.getMinutes(), 2)}-${zeroPad(date.getSeconds(), 2)}`;
 }
 
 /**
@@ -252,6 +252,12 @@ async function startCameras(): Promise<void> {
       console.log("Camera error: ", pid, err);
       cameraProcesses.delete(pid);
     });
+    process.stderr?.on("data", (data) => {
+      console.error(`cam2rtpfile [${pid}]: `, data.toString().trim())
+    })
+    process.stdout?.on("data", (data) => {
+      console.log(`cam2rtpfile [${pid}]: `, data.toString().trim())
+    })
     cameraProcesses.set(pid, camera);
   }
 }
@@ -313,7 +319,7 @@ app.get("/record", async (req, res) => {
     const file = `${session}_Video${name}--${formatDate(new Date())}`
     await writeLn(
       p.proc,
-      `record ${join(videoDir, file)}`
+      `record "${join(videoDir, file).replaceAll('\\', '\\\\')}"`
     );
     currentRecordFiles.push(file)
   }
@@ -326,7 +332,7 @@ app.get("/stoprecord", async (req, res) => {
   if (req.query.deleteFiles != null)
     for (const file of currentRecordFiles)
       for (const matchingFile of (await readdir(videoDir)).filter(f => f.startsWith(file)))
-        await rm(join(videoDir,matchingFile))
+        await rm(join(videoDir, matchingFile))
   currentRecordFiles.length = 0
   res.send("OK");
 });

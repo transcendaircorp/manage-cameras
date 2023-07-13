@@ -96,7 +96,7 @@ export default (output: string): GSTDevice[] => {
         } else if (field != null) {
             // continuation of previous field
             if (properties) {
-                if (current.property != null) {
+                if (current.property != null && current.property !== false) {
                     set(device[field], current.property.key, current.property.value);
                 }
             } else {
