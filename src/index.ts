@@ -1,5 +1,14 @@
 import { spawn, exec, type ChildProcess } from "child_process";
+import { promisify } from 'util';
 import express from "express";
+import parseGstDevices from "./parse.js"
+import nodeDiskInfo from 'node-disk-info';
+import { type Dir } from "fs";
+import { readdir, opendir, stat, rm } from "fs/promises"
+import { join } from "path";
+import fastFolderSize from "fast-folder-size"
+const folderSize = promisify(fastFolderSize)
+const execAsync = promisify(exec);
 
 interface StorageDevice {
   device: string;
@@ -25,126 +34,107 @@ interface VideoFormat {
   fps: number;
 }
 interface CameraProperties {
-  deviceNumber: number;
+  path: string;
   formats: VideoFormat[];
 }
 
-function parseVideoFormats(output: string): VideoFormat[] {
-  const formats: VideoFormat[] = [];
-  const lines = output.split("\n");
-
-  let currentPixelFormat: string | null = null;
-  let currentSize: { width: number; height: number } | null = null;
-
-  for (let i = 0; i < lines.length; i++) {
-    const parts = lines[i].trim().split(":");
-    if (parts.length !== 2) continue;
-    const key = parts[0].trim();
-    const value = parts[1].trim();
-
-    if (key === "Pixel Format") {
-      currentPixelFormat = null;
-      const pixelFormatMatch = value.match(/'(.*)'/);
-      if (pixelFormatMatch === null) continue;
-      currentPixelFormat = pixelFormatMatch[1];
-      continue;
-    }
-    if (key === "Size") {
-      currentSize = null;
-      const sizeMatch = value.match(/(\d+)x(\d+)/);
-      if (sizeMatch === null) continue;
-      currentSize = {
-        width: parseInt(sizeMatch[1]),
-        height: parseInt(sizeMatch[2]),
-      };
-      continue;
-    }
-    if (key === "Interval") {
-      const intervalMatch = value.match(/.*(\d+\.\d+)s \((\d+\.\d+) fps\)/);
-      if (intervalMatch === null) continue;
-      formats.push({
-        pixelFormat: currentPixelFormat ?? "",
-        width: currentSize?.width ?? 0,
-        height: currentSize?.height ?? 0,
-        fps: parseFloat(intervalMatch[2]),
-      });
-    }
-  }
-  return formats;
+if (process.env.VIDEO_DIR === undefined) {
+  console.error("Please run the program with a VIDEO_DIR env variable")
+  process.exit(1);
 }
-
-async function execAsync(command: string): Promise<string> {
-  return await new Promise((resolve, reject) => {
-    exec(command, (err, stdout, _stderr) => {
-      if (err != null) reject(err);
-      resolve(stdout);
-    });
-  });
+const videoDir = process.env.VIDEO_DIR;
+let dir: Dir;
+try {
+  dir = await opendir(videoDir)
+} catch (err) {
+  console.error("VIDEO_DIR not valid, please make sure directory exists")
+  process.exit(1);
 }
+await dir.close();
+
 /**
  * Runs command to fetch currently attached cameras.
  */
 async function getCameras(): Promise<CameraProperties[]> {
-  const lines = (await execAsync("v4l2-ctl --list-devices")).split("\n");
-  const cameras: number[] = [];
-  for (let i = 1; i < lines.length; i++)
-    if (lines[i - 1].endsWith(":"))
-      cameras.push(Number(lines[i].split("video")[1].trim()));
-  return await Promise.all(
-    cameras.map(async (c) => {
-      const res = await execAsync(`v4l2-ctl -d ${c} --list-formats-ext`);
+  const output = await execAsync("gst-device-monitor-1.0 Video/Source:image/jpeg,width=1920,height=1080");
+  const devices = parseGstDevices(output.stdout);
+
+  return devices.map(d => {
+    if (d.properties?.device?.path == null) return undefined;
+    const formats = d.caps?.map(c => {
+      let width: number = Number.NaN;
+      if (c.parameters.width?.type === "atom") {
+        width = + c.parameters.width.value;
+      }
+      if (isNaN(width))
+        return undefined;
+      let height: number = Number.NaN;
+      if (c.parameters.height?.type === "atom") {
+        height = + c.parameters.height.value;
+      }
+      if (isNaN(height))
+        return undefined;
+      let fps: number = Number.NaN;
+      if (c.parameters.framerate?.type === "atom") {
+        const s = c.parameters.framerate.value.split("/")
+        if (s.length !== 2) return undefined;
+        fps = +s[0] / +s[1]
+      } else if (c.parameters.fps.type === "range") {
+        fps = +c.parameters.fps.max / +(c.parameters.fps.maxdenom ?? "")
+      }
+      if (isNaN(fps)) return undefined;
+      if (c.type === undefined) return undefined
       return {
-        deviceNumber: c,
-        formats: parseVideoFormats(res),
-      };
-    })
-  );
+        width,
+        height,
+        fps,
+        pixelFormat: c.type
+      }
+    }).filter((x): x is VideoFormat => !(x == null))
+    if ((formats == null) || formats.length === 0)
+      return undefined;
+    return {
+      path: d.properties?.device?.path,
+      formats
+    }
+  }).filter((x): x is CameraProperties => !(x == null));
 }
 
 /**
  * Returns a list of storage devices
  */
-async function getStorageStats(): Promise<StorageDevice[]> {
-  const out = await execAsync("df");
-  return out.split("\n").flatMap((l) => {
-    if (l.startsWith("/dev")) {
-      const parts = l.trim().split(/\s+/);
-      return [
-        {
-          device: parts[0],
-          size: Number(parts[1]) * 1024,
-          used: Number(parts[2]) * 1024,
-          available: Number(parts[3]) * 1024,
-          use: parts[4],
-          mount: parts[5],
-        },
-      ];
-    } else return [];
-  });
+async function getStorageStats(): Promise<StorageDevice[] | null> {
+  try {
+    const drives = nodeDiskInfo.getDiskInfoSync();
+    return drives.map(d => ({
+      device: d.filesystem,
+      size: d.blocks,
+      used: d.used,
+      available: d.available,
+      use: d.capacity,
+      mount: d.mounted,
+    }));
+  } catch (e) {
+    console.error(e);
+    return null
+  }
 }
 
 /**
  * Returns a list of all files in the Videos directory
  */
 async function getVideos(): Promise<VideoFile[]> {
-  return await new Promise((resolve, reject) => {
-    exec("ls -l --full-time /media/videousb", (err, stdout, _stderr) => {
-      if (err != null) reject(err);
-      resolve(
-        stdout
-          .split("\n")
-          .slice(1, -1)
-          .map((l) => {
-            const parts = l.trim().split(/\s+/);
-            return {
-              name: parts[8],
-              size: Number(parts[4]),
-              date: new Date(parts.slice(5, 7).join(" ")),
-            };
-          })
-      );
-    });
-  });
+  const files = await readdir(videoDir);
+  const data: VideoFile[] = []
+  for (const file of files) {
+    const stats = await stat(join(videoDir, file));
+    data.push({
+      name: file,
+      size: stats.size,
+      date: stats.ctime
+    })
+  }
+  return data;
 }
 
 /**
@@ -206,17 +196,19 @@ async function killProcesses(
  * @param camera Video stream number
  * @param port Port to listen on
  */
-function startCamera(camera: CameraProperties, port: number): CameraProcess {
+function startCamera(camera: CameraProperties, port: number): CameraProcess | null {
   // find best format
-  const format = camera.formats
-    .filter((c) => c.pixelFormat.toLocaleUpperCase() === "MJPG")
+  const formats = camera.formats
+    .filter((c) => c.pixelFormat.toLocaleLowerCase() === "image/jpeg")
     .filter((c) => c.width === 1920 && c.height === 1080)
-    .reduce((a, b) => (a.fps > b.fps ? a : b));
+  if (formats.length === 0)
+    return null;
+  const format = formats.reduce((a, b) => (a.fps > b.fps ? a : b));
   return {
     port,
     proc: spawn("cam2rtpfile", [
       "-c",
-      `/dev/video${camera.deviceNumber}`,
+      camera.path,
       "-f",
       format.fps.toString(),
       "-r",
@@ -229,9 +221,8 @@ function startCamera(camera: CameraProperties, port: number): CameraProcess {
  * Formats date to be used in file names
  */
 function formatDate(date: Date): string {
-  return `${date.getFullYear()}-${
-    date.getMonth() + 1
-  }-${date.getDate()}-${date.getHours()}-${date.getMinutes()}-${date.getSeconds()}`;
+  return `${date.getFullYear()}-${date.getMonth() + 1
+    }-${date.getDate()}-${date.getHours()}-${date.getMinutes()}-${date.getSeconds()}`;
 }
 
 /**
@@ -242,6 +233,7 @@ async function startCameras(): Promise<void> {
   const cameras = await getCameras();
   for (const [i, cameraProperties] of cameras.entries()) {
     const camera = startCamera(cameraProperties, port + i);
+    if (camera === null) continue;
     const process = camera.proc;
     const pid = process.pid as number;
     process.on("disconnect", () => {
@@ -310,23 +302,36 @@ app.get("/request", async (req, res) => {
   }
   res.send("OK");
 });
+const currentRecordFiles: string[] = []
 // eslint-disable-next-line @typescript-eslint/no-misused-promises
 app.get("/record", async (req, res) => {
   const session = req.query.session as string;
   if (session == null) return res.sendStatus(400);
+  currentRecordFiles.length = 0
   for (const [i, p] of [...cameraProcesses.values()].entries()) {
     const name = p.proc.pid == null ? i : cameraNames.get(p.proc.pid) ?? i;
+    const file = `${session}_Video${name}--${formatDate(new Date())}`
     await writeLn(
       p.proc,
-      `record /media/videousb/${session}_Video${name}--${formatDate(
-        new Date()
-      )}`
+      `record ${join(videoDir, file)}`
     );
+    currentRecordFiles.push(file)
   }
   res.send("OK");
 });
 // eslint-disable-next-line @typescript-eslint/no-misused-promises
-app.get("/:command(stoprecord|play|pause|stop)", async (req, res) => {
+app.get("/stoprecord", async (req, res) => {
+  for (const p of cameraProcesses.values())
+    await writeLn(p.proc, "stoprecord");
+  if (req.query.deleteFiles != null)
+    for (const file of currentRecordFiles)
+      for (const matchingFile of (await readdir(videoDir)).filter(f => f.startsWith(file)))
+        await rm(join(videoDir,matchingFile))
+  currentRecordFiles.length = 0
+  res.send("OK");
+});
+// eslint-disable-next-line @typescript-eslint/no-misused-promises
+app.get("/:command(play|pause|stop)", async (req, res) => {
   for (const p of cameraProcesses.values())
     await writeLn(p.proc, req.params.command);
   res.send("OK");
@@ -353,6 +358,9 @@ app.get("/restart", async (_req, res) => {
 // eslint-disable-next-line @typescript-eslint/no-misused-promises
 app.get("/status", async (_req, res) => {
   res.header("Content-Type", "application/json");
+  const freeStorage = await getStorageStats();
+  const videoFiles = await getVideos();
+  const size = await folderSize(videoDir);
   res.send(
     JSON.stringify({
       processes: [...cameraProcesses.values()].map((p) => ({
@@ -361,8 +369,9 @@ app.get("/status", async (_req, res) => {
         signalCode: p.proc.signalCode,
         pid: p.proc.pid,
       })),
-      freeStorage: await getStorageStats(),
-      videoFiles: await getVideos(),
+      freeStorage,
+      videoFiles,
+      folderSize: size
     })
   );
 });
