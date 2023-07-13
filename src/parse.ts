@@ -40,6 +40,7 @@ interface GSTDevice {
             name: string,
             path: string
         }
+        [key:string]: any;
     },
     caps?: GSTCap[],
     [other: string]: any,

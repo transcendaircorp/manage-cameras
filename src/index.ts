@@ -60,7 +60,8 @@ async function getCameras(): Promise<CameraProperties[]> {
   const devices = parseGstDevices(output.stdout);
 
   return devices.map(d => {
-    if (d.properties?.device?.path == null) return undefined;
+    const path = d.properties?.device?.api === "v4l2" ? d.properties?.api?.v4l2?.path : d.properties?.device?.path;
+    if (path == null) return undefined;
     const formats = d.caps?.map(c => {
       let width: number = Number.NaN;
       if (c.parameters.width?.type === "atom") {
@@ -79,8 +80,16 @@ async function getCameras(): Promise<CameraProperties[]> {
         const s = c.parameters.framerate.value.split("/")
         if (s.length !== 2) return undefined;
         fps = +s[0] / +s[1]
-      } else if (c.parameters.fps.type === "range") {
-        fps = +c.parameters.fps.max / +(c.parameters.fps.maxdenom ?? "")
+      } else if (c.parameters.framerate?.type === "range") {
+        fps = +c.parameters.framerate.max / +(c.parameters.framerate.maxdenom ?? "")
+      } else if (c.parameters.framerate?.type === "choice") {
+        const options = c.parameters.framerate?.list.map(f=>{
+          const s = f.split("/")
+          if (s.length !== 2) return undefined;
+          return +s[0] / +s[1]
+        }).filter((x): x is number => x != null);
+        if (options.length === 0) return undefined;
+        fps = options.reduce((a,b)=> (a > b ? a : b))??Number.NaN
       }
       if (isNaN(fps)) return undefined;
       if (c.type === undefined) return undefined
@@ -94,7 +103,7 @@ async function getCameras(): Promise<CameraProperties[]> {
     if ((formats == null) || formats.length === 0)
       return undefined;
     return {
-      path: d.properties?.device?.path,
+      path,
       formats
     }
   }).filter((x): x is CameraProperties => !(x == null));
