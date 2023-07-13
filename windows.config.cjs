@@ -3,7 +3,7 @@ module.exports = {
     name   : "manage-cameras",
     script : "./dist/index.js",
     env: {
-      VIDEO_DIR: "G:/Shared drives/Transcend/Engineering/Software/FTIT Data/Video"
+      VIDEO_DIR: "C:/Users/LattePanda/Desktop/Videos"
     },
   }]
 }
