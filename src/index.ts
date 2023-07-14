@@ -1,13 +1,13 @@
 import { spawn, exec, type ChildProcess } from "child_process";
-import { promisify } from 'util';
+import { promisify } from "util";
 import express from "express";
-import parseGstDevices from "./parse.js"
-import nodeDiskInfo from 'node-disk-info';
+import parseGstDevices from "./parse.js";
+import nodeDiskInfo from "node-disk-info";
 import { type Dir } from "fs";
-import { readdir, opendir, stat, rm } from "fs/promises"
+import { readdir, opendir, stat, rm } from "fs/promises";
 import { join } from "path";
-import fastFolderSize from "fast-folder-size"
-const folderSize = promisify(fastFolderSize)
+import fastFolderSize from "fast-folder-size";
+const folderSize = promisify(fastFolderSize);
 const execAsync = promisify(exec);
 
 interface StorageDevice {
@@ -39,15 +39,15 @@ interface CameraProperties {
 }
 
 if (process.env.VIDEO_DIR === undefined) {
-  console.error("Please run the program with a VIDEO_DIR env variable")
+  console.error("Please run the program with a VIDEO_DIR env variable");
   process.exit(1);
 }
 const videoDir = process.env.VIDEO_DIR;
 let dir: Dir;
 try {
-  dir = await opendir(videoDir)
+  dir = await opendir(videoDir);
 } catch (err) {
-  console.error("VIDEO_DIR not valid, please make sure directory exists")
+  console.error("VIDEO_DIR not valid, please make sure directory exists");
   process.exit(1);
 }
 await dir.close();
@@ -56,57 +56,64 @@ await dir.close();
  * Runs command to fetch currently attached cameras.
  */
 async function getCameras(): Promise<CameraProperties[]> {
-  const output = await execAsync("gst-device-monitor-1.0 Video/Source:image/jpeg,width=1920,height=1080");
+  const output = await execAsync(
+    "gst-device-monitor-1.0 Video/Source:image/jpeg,width=1920,height=1080"
+  );
   const devices = parseGstDevices(output.stdout);
 
-  return devices.map(d => {
-    const path = d.properties?.device?.api === "v4l2" ? d.properties?.api?.v4l2?.path : d.properties?.device?.path;
-    if (path == null) return undefined;
-    const formats = d.caps?.map(c => {
-      let width: number = Number.NaN;
-      if (c.parameters.width?.type === "atom") {
-        width = + c.parameters.width.value;
-      }
-      if (isNaN(width))
-        return undefined;
-      let height: number = Number.NaN;
-      if (c.parameters.height?.type === "atom") {
-        height = + c.parameters.height.value;
-      }
-      if (isNaN(height))
-        return undefined;
-      let fps: number = Number.NaN;
-      if (c.parameters.framerate?.type === "atom") {
-        const s = c.parameters.framerate.value.split("/")
-        if (s.length !== 2) return undefined;
-        fps = +s[0] / +s[1]
-      } else if (c.parameters.framerate?.type === "range") {
-        fps = +c.parameters.framerate.max / +(c.parameters.framerate.maxdenom ?? "")
-      } else if (c.parameters.framerate?.type === "choice") {
-        const options = c.parameters.framerate?.list.map(f => {
-          const s = f.split("/")
-          if (s.length !== 2) return undefined;
-          return +s[0] / +s[1]
-        }).filter((x): x is number => x != null);
-        if (options.length === 0) return undefined;
-        fps = options.reduce((a, b) => (a > b ? a : b)) ?? Number.NaN
-      }
-      if (isNaN(fps)) return undefined;
-      if (c.type === undefined) return undefined
+  return devices
+    .map((d) => {
+      const path = d.properties?.device?.path ?? d.properties?.api?.v4l2?.path;
+      if (path == null) return null;
+      const formats = d.caps
+        ?.map((c) => {
+          let width: number = Number.NaN;
+          if (c.parameters.width?.type === "atom") {
+            width = +c.parameters.width.value;
+          }
+          if (isNaN(width)) return null;
+          let height: number = Number.NaN;
+          if (c.parameters.height?.type === "atom") {
+            height = +c.parameters.height.value;
+          }
+          if (isNaN(height)) return null;
+          let fps: number = Number.NaN;
+          if (c.parameters.framerate?.type === "atom") {
+            const s = c.parameters.framerate.value.split("/");
+            if (s.length !== 2) return null;
+            fps = +s[0] / +s[1];
+          } else if (c.parameters.framerate?.type === "range") {
+            fps =
+              +c.parameters.framerate.max /
+              +(c.parameters.framerate.maxdenom ?? "");
+          } else if (c.parameters.framerate?.type === "choice") {
+            const options = c.parameters.framerate?.list
+              .map((f) => {
+                const s = f.split("/");
+                if (s.length !== 2) return null;
+                return +s[0] / +s[1];
+              })
+              .filter((x): x is number => x != null);
+            if (options.length === 0) return null;
+            fps = options.reduce((a, b) => (a > b ? a : b)) ?? Number.NaN;
+          }
+          if (isNaN(fps)) return null;
+          if (c.type === undefined) return null;
+          return {
+            width,
+            height,
+            fps,
+            pixelFormat: c.type,
+          };
+        })
+        .filter((x): x is VideoFormat => !(x == null));
+      if (formats == null || formats.length === 0) return null;
       return {
-        width,
-        height,
-        fps,
-        pixelFormat: c.type
-      }
-    }).filter((x): x is VideoFormat => !(x == null))
-    if ((formats == null) || formats.length === 0)
-      return undefined;
-    return {
-      path,
-      formats
-    }
-  }).filter((x): x is CameraProperties => !(x == null));
+        path,
+        formats,
+      };
+    })
+    .filter((x): x is CameraProperties => !(x == null));
 }
 
 /**
@@ -115,7 +122,7 @@ async function getCameras(): Promise<CameraProperties[]> {
 async function getStorageStats(): Promise<StorageDevice[] | null> {
   try {
     const drives = nodeDiskInfo.getDiskInfoSync();
-    return drives.map(d => ({
+    return drives.map((d) => ({
       device: d.filesystem,
       size: d.blocks,
       used: d.used,
@@ -125,7 +132,7 @@ async function getStorageStats(): Promise<StorageDevice[] | null> {
     }));
   } catch (e) {
     console.error(e);
-    return null
+    return null;
   }
 }
 
@@ -134,14 +141,14 @@ async function getStorageStats(): Promise<StorageDevice[] | null> {
  */
 async function getVideos(): Promise<VideoFile[]> {
   const files = await readdir(videoDir);
-  const data: VideoFile[] = []
+  const data: VideoFile[] = [];
   for (const file of files) {
     const stats = await stat(join(videoDir, file));
     data.push({
       name: file,
       size: stats.size,
-      date: stats.ctime
-    })
+      date: stats.ctime,
+    });
   }
   return data;
 }
@@ -164,15 +171,11 @@ async function killProcess(
     }
     process.on("exit", exitCb);
     process.on("error", exitCb);
-    process.on("close", exitCb);
-    process.on("disconnect", exitCb);
     setTimeout(reject, 2000);
     process.kill(signal);
   }).finally(() => {
     process.off("exit", exitCb);
     process.off("error", exitCb);
-    process.off("close", exitCb);
-    process.off("disconnect", exitCb);
   });
 }
 
@@ -205,33 +208,64 @@ async function killProcesses(
  * @param camera Video stream number
  * @param port Port to listen on
  */
-function startCamera(camera: CameraProperties, port: number): CameraProcess | null {
+function startCamera(
+  camera: CameraProperties,
+  port: number
+): CameraProcess | null {
   // find best format
   const formats = camera.formats
     .filter((c) => c.pixelFormat.toLocaleLowerCase() === "image/jpeg")
-    .filter((c) => c.width === 1920 && c.height === 1080)
-  if (formats.length === 0)
-    return null;
+    .filter((c) => c.width === 1920 && c.height === 1080);
+  if (formats.length === 0) return null;
   const format = formats.reduce((a, b) => (a.fps > b.fps ? a : b));
-  return {
+  const process = spawn("cam2rtpfile", [
+    "-c",
+    camera.path,
+    "-f",
+    format.fps.toString(),
+    "-r",
+    `${format.width}x${format.height}`,
+  ]);
+  const pid = process.pid as number;
+  process.on("disconnect", () => {
+    console.log("Camera disconnected: ", pid);
+    cameraProcesses.delete(pid);
+  });
+  process.on("exit", (code, signal) => {
+    console.log("Camera exit: ", pid, code, signal);
+    cameraProcesses.delete(pid);
+  });
+  process.on("error", (err) => {
+    console.log("Camera error: ", pid, err);
+    cameraProcesses.delete(pid);
+  });
+  process.stderr?.on("data", (data) => {
+    console.error(`cam2rtpfile [${pid}]: `, data.toString().trim());
+  });
+  process.stdout?.on("data", (data) => {
+    console.log(`cam2rtpfile [${pid}]: `, data.toString().trim());
+  });
+  const cameraProc = {
     port,
-    proc: spawn("cam2rtpfile", [
-      "-c",
-      camera.path,
-      "-f",
-      format.fps.toString(),
-      "-r",
-      `${format.width}x${format.height}`,
-    ]),
+    proc: process,
   };
+  cameraProcesses.set(pid, cameraProc);
+  return cameraProc;
 }
-const zeroPad = (num: number, places: number): string => String(num).padStart(places, '0')
+
 /**
  * Formats date to be used in file names
  */
 function formatDate(date: Date): string {
-  return `${zeroPad(date.getFullYear(), 4)}-${zeroPad((date.getMonth() + 1), 2)
-    }-${zeroPad(date.getDate(), 2)}-${zeroPad(date.getHours(), 2)}-${zeroPad(date.getMinutes(), 2)}-${zeroPad(date.getSeconds(), 2)}`;
+  const zeroPad = (num: number, places: number): string =>
+    String(num).padStart(places, "0");
+  return `${zeroPad(date.getFullYear(), 4)}-${zeroPad(
+    date.getMonth() + 1,
+    2
+  )}-${zeroPad(date.getDate(), 2)}-${zeroPad(date.getHours(), 2)}-${zeroPad(
+    date.getMinutes(),
+    2
+  )}-${zeroPad(date.getSeconds(), 2)}`;
 }
 
 /**
@@ -240,36 +274,14 @@ function formatDate(date: Date): string {
 async function startCameras(): Promise<number> {
   const port = 5000;
   const cameras = await getCameras();
-  for (const [i, cameraProperties] of cameras.entries()) {
-    const camera = startCamera(cameraProperties, port + i);
-    if (camera === null) continue;
-    const process = camera.proc;
-    const pid = process.pid as number;
-    process.on("disconnect", () => {
-      console.log("Camera disconnected: ", pid);
-      cameraProcesses.delete(pid);
-    });
-    process.on("exit", (code, signal) => {
-      console.log("Camera exit: ", pid, code, signal);
-      cameraProcesses.delete(pid);
-    });
-    process.on("close", (code, signal) => {
-      console.log("Camera close: ", pid, code, signal);
-      cameraProcesses.delete(pid);
-    });
-    process.on("error", (err) => {
-      console.log("Camera error: ", pid, err);
-      cameraProcesses.delete(pid);
-    });
-    process.stderr?.on("data", (data) => {
-      console.error(`cam2rtpfile [${pid}]: `, data.toString().trim())
-    })
-    process.stdout?.on("data", (data) => {
-      console.log(`cam2rtpfile [${pid}]: `, data.toString().trim())
-    })
-    cameraProcesses.set(pid, camera);
-  }
-  return cameras.length;
+  return (
+    await Promise.allSettled(
+      cameras.map(
+        async (cameraProperties, i): Promise<boolean> =>
+          startCamera(cameraProperties, port + i) != null
+      )
+    )
+  ).reduce((a, v) => a + (v.status === "fulfilled" && v.value ? 1 : 0), 0);
 }
 
 /**
@@ -303,8 +315,50 @@ function logError(msg: string) {
   };
 }
 
+const sigs: NodeJS.Signals[] = ["SIGTERM", "SIGINT", "SIGQUIT"];
+for (const sig of sigs) {
+  process.on(sig, () => {
+    killProcesses(cameraProcesses, sig)
+      .then(() => process.exit(0))
+      .catch(() => {
+        killProcesses(cameraProcesses, "SIGKILL").finally(() => {
+          process.exit(1);
+        });
+      });
+  });
+}
+
 // basic express server
 const app = express();
+// eslint-disable-next-line @typescript-eslint/no-misused-promises
+app.get("/status", async (_req, res) => {
+  res.header("Content-Type", "application/json");
+  const freeStorage = await getStorageStats();
+  const videoFiles = await getVideos();
+  const size = await folderSize(videoDir);
+  res.send(
+    JSON.stringify({
+      processes: [...cameraProcesses.values()].map((p) => ({
+        args: p.proc.spawnargs,
+        exitCode: p.proc.exitCode,
+        signalCode: p.proc.signalCode,
+        pid: p.proc.pid,
+      })),
+      freeStorage,
+      videoFiles,
+      folderSize: size,
+    })
+  );
+});
+// serve express
+app.listen(8080, () => {
+  console.log("listening on port 8080");
+});
+
+// attempt camera connection
+while ((await startCameras()) === 0)
+  await new Promise((resolve, reject) => setTimeout(resolve, 2000));
+
 // eslint-disable-next-line @typescript-eslint/no-misused-promises
 app.get("/request", async (req, res) => {
   const ip = req.ip.split(":").slice(-1)[0];
@@ -317,32 +371,33 @@ app.get("/request", async (req, res) => {
   }
   res.send("OK");
 });
-const currentRecordFiles: string[] = []
+const currentRecordFiles: string[] = [];
 // eslint-disable-next-line @typescript-eslint/no-misused-promises
 app.get("/record", async (req, res) => {
   const session = req.query.session as string;
   if (session == null) return res.sendStatus(400);
-  currentRecordFiles.length = 0
+  currentRecordFiles.length = 0;
   for (const [i, p] of [...cameraProcesses.values()].entries()) {
     const name = p.proc.pid == null ? i : cameraNames.get(p.proc.pid) ?? i;
-    const file = `${session}_Video${name}--${formatDate(new Date())}`
+    const file = `${session}_Video${name}--${formatDate(new Date())}`;
     await writeLn(
       p.proc,
-      `record "${join(videoDir, file).replaceAll('\\', '\\\\')}"`
+      `record "${join(videoDir, file).replaceAll("\\", "\\\\")}"`
     );
-    currentRecordFiles.push(file)
+    currentRecordFiles.push(file);
   }
   res.send("OK");
 });
 // eslint-disable-next-line @typescript-eslint/no-misused-promises
 app.get("/stoprecord", async (req, res) => {
-  for (const p of cameraProcesses.values())
-    await writeLn(p.proc, "stoprecord");
+  for (const p of cameraProcesses.values()) await writeLn(p.proc, "stoprecord");
   if (req.query.deleteFiles != null)
     for (const file of currentRecordFiles)
-      for (const matchingFile of (await readdir(videoDir)).filter(f => f.startsWith(file)))
-        await rm(join(videoDir, matchingFile))
-  currentRecordFiles.length = 0
+      for (const matchingFile of (await readdir(videoDir)).filter((f) =>
+        f.startsWith(file)
+      ))
+        await rm(join(videoDir, matchingFile));
+  currentRecordFiles.length = 0;
   res.send("OK");
 });
 // eslint-disable-next-line @typescript-eslint/no-misused-promises
@@ -370,47 +425,7 @@ app.get("/restart", async (_req, res) => {
   res.status(200);
   res.send("OK");
 });
-// eslint-disable-next-line @typescript-eslint/no-misused-promises
-app.get("/status", async (_req, res) => {
-  res.header("Content-Type", "application/json");
-  const freeStorage = await getStorageStats();
-  const videoFiles = await getVideos();
-  const size = await folderSize(videoDir);
-  res.send(
-    JSON.stringify({
-      processes: [...cameraProcesses.values()].map((p) => ({
-        args: p.proc.spawnargs,
-        exitCode: p.proc.exitCode,
-        signalCode: p.proc.signalCode,
-        pid: p.proc.pid,
-      })),
-      freeStorage,
-      videoFiles,
-      folderSize: size
-    })
-  );
-});
 app.get("/setCameraNames", (req, res) => {
   Object.assign(cameraNames, req.query);
   res.send("OK");
 });
-// attempt camera connection
-for (let i = 0; i < 5 && (await startCameras()) === 0; i++)
-  await new Promise((resolve, reject) => setTimeout(resolve, 2000));
-// serve express
-app.listen(8080, () => {
-  console.log("listening on port 8080");
-});
-
-const sigs: NodeJS.Signals[] = ["SIGTERM", "SIGINT", "SIGQUIT"];
-for (const sig of sigs) {
-  process.on(sig, () => {
-    killProcesses(cameraProcesses, sig)
-      .then(() => process.exit(0))
-      .catch(() => {
-        killProcesses(cameraProcesses, "SIGKILL").finally(() => {
-          process.exit(1);
-        });
-      });
-  });
-}
