@@ -83,13 +83,13 @@ async function getCameras(): Promise<CameraProperties[]> {
       } else if (c.parameters.framerate?.type === "range") {
         fps = +c.parameters.framerate.max / +(c.parameters.framerate.maxdenom ?? "")
       } else if (c.parameters.framerate?.type === "choice") {
-        const options = c.parameters.framerate?.list.map(f=>{
+        const options = c.parameters.framerate?.list.map(f => {
           const s = f.split("/")
           if (s.length !== 2) return undefined;
           return +s[0] / +s[1]
         }).filter((x): x is number => x != null);
         if (options.length === 0) return undefined;
-        fps = options.reduce((a,b)=> (a > b ? a : b))??Number.NaN
+        fps = options.reduce((a, b) => (a > b ? a : b)) ?? Number.NaN
       }
       if (isNaN(fps)) return undefined;
       if (c.type === undefined) return undefined
@@ -237,7 +237,7 @@ function formatDate(date: Date): string {
 /**
  * Start all the cameras. If a session is passed in, the cameras will record to a file.
  */
-async function startCameras(): Promise<void> {
+async function startCameras(): Promise<number> {
   const port = 5000;
   const cameras = await getCameras();
   for (const [i, cameraProperties] of cameras.entries()) {
@@ -269,6 +269,7 @@ async function startCameras(): Promise<void> {
     })
     cameraProcesses.set(pid, camera);
   }
+  return cameras.length;
 }
 
 /**
@@ -302,7 +303,6 @@ function logError(msg: string) {
   };
 }
 
-await startCameras();
 // basic express server
 const app = express();
 // eslint-disable-next-line @typescript-eslint/no-misused-promises
@@ -394,6 +394,9 @@ app.get("/setCameraNames", (req, res) => {
   Object.assign(cameraNames, req.query);
   res.send("OK");
 });
+// attempt camera connection
+for (let i = 0; i < 5 && (await startCameras()) === 0; i++)
+  await new Promise((resolve, reject) => setTimeout(resolve, 2000));
 // serve express
 app.listen(8080, () => {
   console.log("listening on port 8080");

@@ -3,7 +3,7 @@ module.exports = {
     name   : "manage-cameras",
     script : "./dist/index.js",
     env: {
-      VIDEO_DIR: "/opt/videos"
+      VIDEO_DIR: "/opt/insync/Video"
     },
   }]
 }
